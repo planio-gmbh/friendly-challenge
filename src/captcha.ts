@@ -26,8 +26,9 @@ export class WidgetInstance {
 
     /**
      * The root element of this widget instance.
+     * Warning: it is undefined after `destroy()` has been called.
      */
-    private e: HTMLElement;
+    private e!: HTMLElement;
 
     /**
      * The captcha has been succesfully solved.
@@ -46,6 +47,8 @@ export class WidgetInstance {
      */
     private hasBeenStarted = false;
 
+    private hasBeenDestroyed = false;
+
     constructor(element: HTMLElement, options: Partial<WidgetInstanceOptions> = {}) {
         this.opts = Object.assign({
             forceJSFallback: false,
@@ -63,12 +66,16 @@ export class WidgetInstance {
     }
 
     public init(forceStart?: boolean) {
+        if (this.hasBeenDestroyed) {
+            console.error("FriendlyCaptcha widget has been destroyed using destroy(), it can not be used anymore.");
+            return;
+        }
         this.initWorker();
         this.setupSolver();
 
         if (forceStart) {
             this.start();
-        } else if (this.opts.startMode === "focus" || this.e.dataset["start"] === "focus") {
+        } else if (this.e.dataset["start"] !== "none" && (this.opts.startMode === "focus" || this.e.dataset["start"] === "focus")) {
             const form = findParentFormElement(this.e);
             if (form) {
                 executeOnceOnFocusInEvent(form, () => {
@@ -86,7 +93,7 @@ export class WidgetInstance {
      * Compile the WASM and send the compiled module to the webworker. 
      * If WASM support is not present, it tells the webworker to initialize the JS solver instead.
      */
-    async setupSolver() {
+    private async setupSolver() {
         if (this.opts.forceJSFallback) {
             this.worker!.postMessage({type: "js"});
             return;
@@ -121,11 +128,15 @@ export class WidgetInstance {
     }
 
     private initWorker() {
+        if (this.worker) this.worker.terminate();
+
         const workerBlob = new Blob([workerString] as any, { type: "text/javascript" });
         this.worker = new Worker(URL.createObjectURL(workerBlob));
         this.worker.onerror = (e: ErrorEvent) => this.onWorkerError(e);
 
         this.worker.onmessage = (e: any) => {
+            if (this.hasBeenDestroyed) return;
+
             const data = e.data;
             if (!data) return;
             if (data.type === "progress") {
@@ -156,6 +167,11 @@ export class WidgetInstance {
     }
 
     public async start() {
+        if (this.hasBeenDestroyed) {
+            console.error("Can not start FriendlyCaptcha widget which has been destroyed")
+            return;
+        }
+
         this.hasBeenStarted = true;
         const sitekey = this.e.dataset["sitekey"];
         if (!sitekey) {
@@ -198,8 +214,43 @@ export class WidgetInstance {
         this.valid = true;
         const puzzleSolutionMessage = `${this.puzzle!.signature}.${this.puzzle!.base64}.${encode(data.solution)}.${encode(data.diagnostics)}`;
         this.e.innerHTML = getDoneHTML(puzzleSolutionMessage, data);
+        if (this.worker) this.worker.terminate();
         // this.worker = null; // This literally crashes very old browsers..
         this.needsReInit = true;
+        
         return puzzleSolutionMessage;
+    }
+
+    /**
+     * Cleans up the widget entirely, removing any DOM elements and terminating any background workers.
+     * After it is destroyed it can no longer be used for any purpose.
+     */
+    public destroy() {
+        if (this.worker) this.worker.terminate();
+        this.worker = null;
+        this.needsReInit = false;
+        this.hasBeenStarted = false;
+        if (this.e) {
+            this.e.remove();
+            delete this.e;
+        }
+        this.hasBeenDestroyed = true;
+    }
+
+    /**
+     * Resets the widget to the initial state.
+     * This is useful in situations where the page does not refresh when you submit and the form may be re-submitted again
+     */
+    public reset() {
+        if (this.hasBeenDestroyed) {
+            console.error("FriendlyCaptcha widget has been destroyed, it can not be used anymore");
+            return;
+        }
+
+        if (this.worker) this.worker.terminate();
+        this.worker = null;
+        this.needsReInit = false;
+        this.hasBeenStarted = false;
+        this.init(this.opts.startMode === "auto" || this.e.dataset["start"] === "auto");
     }
 }
